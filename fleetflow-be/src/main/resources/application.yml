@@ -1,0 +1,90 @@
+spring:
+  application:
+    name: fleetflow-backend
+  profiles:
+    active: dev
+
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3307}/${MYSQL_DATABASE:fleetflow_db}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh&characterEncoding=UTF-8
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+      max-lifetime: 1200000
+      pool-name: FleetFlowHikariCP
+
+  jpa:
+    defer-datasource-initialization: true
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        dialect: org.hibernate.dialect.MySQLDialect
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+    open-in-view: false
+
+  sql:
+    init:
+      mode: always
+
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+fleetflow:
+  jwt:
+    secret: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+    expiration-ms: 86400000 # 24 hours
+    refresh-expiration-ms: 604800000 # 7 days
+  pricing:
+    volumetric-divisor: 5000.0
+    cod-fee-rate: 0.008 # 0.8%
+    cod-fee-min: 15000.0 # 15k VND min
+    insurance-rate: 0.005 # 0.5%
+    express-multiplier: 1.5
+    same-day-multiplier: 2.2
+  dispatch:
+    max-driver-active-orders: 10
+  monitoring:
+    stale-hours-threshold: 24
+    max-delivery-attempts: 3
+
+# Actuator & Management
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# OpenAPI / Swagger
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+# Logging configuration
+logging:
+  level:
+    root: INFO
+    com.example.fleetflowbe: DEBUG
+    org.springframework.security: INFO
+    org.springframework.web: INFO
+  pattern:
+    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%-5level) %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n"
+
+

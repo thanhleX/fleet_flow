@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  fleetflow-mysql:
+    image: mysql:8.0
+    container_name: fleetflow-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: fleetflow_db
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --max-connections=300
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  fleetflow-redis:
+    image: redis:7.0-alpine
+    container_name: fleetflow-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  fleetflow-rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: fleetflow-rabbitmq
+    restart: always
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  adminer:
+    image: adminer:latest
+    container_name: fleetflow-adminer
+    restart: always
+    ports:
+      - "8081:8080"
+    depends_on:
+      - fleetflow-mysql
+
+volumes:
+  mysql_data:
+  redis_data:
+

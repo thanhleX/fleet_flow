@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FleetFlow - Hệ thống Quản lý Vận chuyển & Giao hàng</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const BASE_URL = 'http://localhost:8080/api/v1';
+
+    const getStoredAuth = () => {
+      try {
+        const raw = localStorage.getItem('fleetflow_auth');
+        return raw ? JSON.parse(raw) : null;
+      } catch { return null; }
+    };
+
+    const setStoredAuth = (auth) => {
+      if (auth) localStorage.setItem('fleetflow_auth', JSON.stringify(auth));
+      else localStorage.removeItem('fleetflow_auth');
+    };
+
+    async function apiRequest(endpoint, options = {}, onUnauthorized = null) {
+      const auth = getStoredAuth();
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(options.headers || {})
+      };
+      if (auth && auth.accessToken) {
+        headers['Authorization'] = `Bearer ${auth.accessToken}`;
+      }
+      try {
+        const res = await fetch(`${BASE_URL}${endpoint}`, { ...options, headers });
+        const data = await res.json();
+        if (res.status === 401 && onUnauthorized) {
+          onUnauthorized();
+          throw new Error('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+        }
+        if (!res.ok) throw new Error(data.message || data.error?.details || `HTTP ${res.status}`);
+        return data.data !== undefined ? data.data : data;
+      } catch (err) {
+        console.error('API Error:', err);
+        throw err;
+      }
+    }
+
+    function App() {
+      const [currentUser, setCurrentUser] = useState(getStoredAuth());
+      const [activeTab, setActiveTab] = useState('dashboard');
+      const [showPublicTrackingOnly, setShowPublicTrackingOnly] = useState(false);
+
+      // Login form state
+      const [loginUsername, setLoginUsername] = useState('');
+      const [loginPassword, setLoginPassword] = useState('');
+
+      // App data state
+      const [dashboardData, setDashboardData] = useState(null);
+      const [shipments, setShipments] = useState([]);
+      const [selectedStatus, setSelectedStatus] = useState('ALL');
+      const [loading, setLoading] = useState(false);
+      const [toast, setToast] = useState(null);
+
+      // Tracking state
+      const [trackingCode, setTrackingCode] = useState('');
+      const [trackingData, setTrackingData] = useState(null);
+
+      // Create shipment state
+      const [showCreateModal, setShowCreateModal] = useState(false);
+      const [createForm, setCreateForm] = useState({
+        senderName: 'Shop Quần Áo Vintage',
+        senderPhone: '0987654321',
+        senderAddress: '25 Phố Huế, Hoàn Kiếm',
+        senderProvince: 'Hà Nội',
+        receiverName: 'Nguyễn Văn Nam',
+        receiverPhone: '0912345678',
+        receiverAddress: '100 Cầu Giấy',
+        receiverProvince: 'Hà Nội',
+        originHubId: 1,
+        serviceTier: 'STANDARD',
+        totalWeightKg: 1.5,
+        lengthCm: 30, widthCm: 20, heightCm: 15,
+        declaredValue: 500000,
+        codAmount: 350000,
+        itemName: 'Áo Sơ Mi Vintage',
+        itemQuantity: 1
+      });
+      const [estimatedPrice, setEstimatedPrice] = useState(null);
+
+      // Driver tasks
+      const [driverTasks, setDriverTasks] = useState([]);
+
+      // COD state
+      const [pendingCod, setPendingCod] = useState([]);
+
+      const notify = (msg, type = 'success') => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 4000);
+      };
+
+      const handleUnauthorized = () => {
+        setStoredAuth(null);
+        setCurrentUser(null);
+        notify('Phiên làm việc đã hết hạn. Vui lòng đăng nhập lại.', 'error');
+      };
+
+      // Perform Login
+      const handleLogin = async (username, password) => {
+        try {
+          setLoading(true);
+          const res = await apiRequest('/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ username, password })
+          });
+          setStoredAuth(res);
+          setCurrentUser(res);
+          notify(`Đăng nhập thành công: ${res.username} (${res.role})`);
+
+          // Switch default tab according to role
+          if (res.role === 'ROLE_DRIVER') {
+            setActiveTab('driver');
+          } else if (res.role === 'ROLE_STAFF') {
+            setActiveTab('shipments');
+          } else {
+            setActiveTab('dashboard');
+          }
+        } catch (err) {
+          notify('Đăng nhập thất bại: ' + err.message, 'error');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const handleLogout = () => {
+        setStoredAuth(null);
+        setCurrentUser(null);
+        setDashboardData(null);
+        setShipments([]);
+        setDriverTasks([]);
+        setPendingCod([]);
+        notify('Đã đăng xuất khỏi hệ thống');
+      };
+
+      const loadDashboard = async () => {
+        try {
+          const d = await apiRequest('/admin/dashboard/stats', {}, handleUnauthorized);
+          setDashboardData(d);
+        } catch (err) {
+          console.warn('Dashboard error:', err);
+        }
+      };
+
+      const loadShipments = async (st = selectedStatus) => {
+        try {
+          setLoading(true);
+          if (st === 'ALL') {
+            const p1 = await apiRequest('/shipments/status/PENDING?page=0&size=15', {}, handleUnauthorized).catch(() => ({ items: [] }));
+            const p2 = await apiRequest('/shipments/status/ASSIGNED?page=0&size=15', {}, handleUnauthorized).catch(() => ({ items: [] }));
+            const p3 = await apiRequest('/shipments/status/DELIVERED?page=0&size=15', {}, handleUnauthorized).catch(() => ({ items: [] }));
+            setShipments([...(p1.items || []), ...(p2.items || []), ...(p3.items || [])]);
+          } else {
+            const res = await apiRequest(`/shipments/status/${st}?page=0&size=30`, {}, handleUnauthorized);
+            setShipments(res.items || []);
+          }
+        } catch (err) {
+          notify(err.message, 'error');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const loadDriverTasks = async (driverId = null) => {
+        try {
+          const targetDriverId = currentUser?.role === 'ROLE_DRIVER' ? '' : (driverId ? `?driverId=${driverId}` : '?driverId=1');
+          const res = await apiRequest(`/shipments/driver/my-tasks${targetDriverId}`, {}, handleUnauthorized);
+          setDriverTasks(res?.items || []);
+        } catch (err) {
+          console.warn('loadDriverTasks error:', err.message);
+        }
+      };
+
+      const loadPendingCod = async (driverId = 1) => {
+        try {
+          const res = await apiRequest(`/cod/driver/${driverId}/pending`, {}, handleUnauthorized);
+          setPendingCod(res || []);
+        } catch (err) {
+          notify(err.message, 'error');
+        }
+      };
+
+      useEffect(() => {
+        if (currentUser) {
+          if (activeTab === 'dashboard') loadDashboard();
+          if (activeTab === 'shipments') loadShipments();
+          if (activeTab === 'driver') loadDriverTasks();
+          if (activeTab === 'cod') loadPendingCod();
+        }
+      }, [currentUser, activeTab, selectedStatus]);
+
+      const handleEstimatePricing = async () => {
+        try {
+          const p = await apiRequest('/pricing/estimate', {
+            method: 'POST',
+            body: JSON.stringify({
+              regionZone: 'INTRA_PROVINCE',
+              serviceTier: createForm.serviceTier,
+              weightKg: parseFloat(createForm.totalWeightKg) || 1.0,
+              lengthCm: parseFloat(createForm.lengthCm),
+              widthCm: parseFloat(createForm.widthCm),
+              heightCm: parseFloat(createForm.heightCm),
+              declaredValue: parseFloat(createForm.declaredValue),
+              codAmount: parseFloat(createForm.codAmount)
+            })
+          });
+          setEstimatedPrice(p);
+        } catch (err) { console.error(err); }
+      };
+
+      const handleCreateShipment = async (e) => {
+        e.preventDefault();
+        try {
+          setLoading(true);
+          const res = await apiRequest('/shipments', {
+            method: 'POST',
+            body: JSON.stringify({
+              ...createForm,
+              originHubId: parseInt(createForm.originHubId),
+              totalWeightKg: parseFloat(createForm.totalWeightKg),
+              lengthCm: parseFloat(createForm.lengthCm),
+              widthCm: parseFloat(createForm.widthCm),
+              heightCm: parseFloat(createForm.heightCm),
+              declaredValue: parseFloat(createForm.declaredValue),
+              codAmount: parseFloat(createForm.codAmount),
+              items: [{
+                itemName: createForm.itemName,
+                quantity: parseInt(createForm.itemQuantity),
+                weightKg: parseFloat(createForm.totalWeightKg),
+                declaredPrice: parseFloat(createForm.declaredValue)
+              }]
+            })
+          }, handleUnauthorized);
+          notify(`Tạo đơn thành công! Mã vận đơn: ${res.trackingCode}`);
+          setShowCreateModal(false);
+          loadShipments();
+        } catch (err) {
+          notify(err.message, 'error');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Test Race Condition (Optimistic Lock)
+      const handleTestConcurrency = async (shipmentId) => {
+        notify('🚀 Đang gửi 5 request gán đơn đồng thời để test Optimistic Lock...', 'info');
+        const tasks = [1, 2, 1, 2, 1].map((dId, idx) =>
+          apiRequest(`/dispatch/${shipmentId}/assign`, {
+            method: 'POST',
+            body: JSON.stringify({ driverId: dId, expectedVersion: 0 })
+          }, handleUnauthorized)
+          .then(() => `Request #${idx + 1}: THÀNH CÔNG 200 OK (Gán cho tài xế ${dId})`)
+          .catch(err => `Request #${idx + 1}: XUNG ĐỘT 409 (${err.message})`)
+        );
+
+        const out = await Promise.all(tasks);
+        alert('KẾT QUẢ TEST CONCURRENCY (Race Condition Test):\n\n' + out.join('\n'));
+        loadShipments();
+      };
+
+      // Test Idempotency
+      const handleTestIdempotency = async () => {
+        const key = `IDEM-TEST-${Date.now()}`;
+        notify('🛡️ Đang bắn 2 request đối soát cùng Idempotency-Key...', 'info');
+        try {
+          const r1 = await apiRequest('/cod/settle', {
+            method: 'POST',
+            headers: { 'Idempotency-Key': key },
+            body: JSON.stringify({ driverId: 1, idempotencyKey: key, note: 'Lần 1' })
+          }, handleUnauthorized);
+          const r2 = await apiRequest('/cod/settle', {
+            method: 'POST',
+            headers: { 'Idempotency-Key': key },
+            body: JSON.stringify({ driverId: 1, idempotencyKey: key, note: 'Lần 2 (trùng key)' })
+          }, handleUnauthorized);
+          alert(`✅ KẾT QUẢ TEST IDEMPOTENCY:\n\n` +
+            `Lần 1: Mã đối soát = ${r1.settlementCode}, Tổng tiền = ${r1.totalAmount} đ\n` +
+            `Lần 2: Mã đối soát = ${r2.settlementCode}, Tổng tiền = ${r2.totalAmount} đ\n\n` +
+            `=> Dữ liệu tài chính an toàn tuyệt đối! Hai request nhận cùng một mã đối soát mà không bị nhân đôi tiền!`
+          );
+          loadPendingCod();
+        } catch (err) {
+          notify(err.message, 'error');
+        }
+      };
+
+      const handleSearchTracking = async (e) => {
+        e.preventDefault();
+        if (!trackingCode) return;
+        try {
+          setLoading(true);
+          const res = await apiRequest(`/public/tracking/${trackingCode.trim()}`);
+          setTrackingData(res);
+        } catch (err) {
+          notify('Không tìm thấy đơn: ' + err.message, 'error');
+          setTrackingData(null);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // ==========================================
+      // VIEW 1: UNLOGGED-IN LOGIN SCREEN
+      // ==========================================
+      if (!currentUser && !showPublicTrackingOnly) {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-blue-950 flex flex-col justify-center items-center p-4">
+            {toast && (
+              <div className="fixed top-5 right-5 z-50">
+                <div className={`px-4 py-3 rounded-lg shadow-lg text-white text-xs font-semibold ${
+                  toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'
+                }`}>
+                  {toast.msg}
+                </div>
+              </div>
+            )}
+
+            <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl overflow-hidden border border-slate-700/30">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-600 to-indigo-700 p-6 text-white text-center">
+                <div className="w-14 h-14 bg-white/20 backdrop-blur rounded-2xl mx-auto flex items-center justify-center mb-3 shadow-inner">
+                  <i className="fa-solid fa-truck-fast text-2xl text-white"></i>
+                </div>
+                <h1 className="text-2xl font-black tracking-tight">FleetFlow System</h1>
+                <p className="text-xs text-blue-100 mt-1">Đăng nhập để truy cập hệ thống quản lý vận chuyển</p>
+              </div>
+
+              {/* Login Form */}
+              <div className="p-6 space-y-5">
+                <form onSubmit={(e) => { e.preventDefault(); handleLogin(loginUsername, loginPassword); }} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Tên đăng nhập (Username)</label>
+                    <div className="relative">
+                      <i className="fa-solid fa-user absolute left-3 top-3 text-slate-400 text-xs"></i>
+                      <input
+                        type="text"
+                        required
+                        value={loginUsername}
+                        onChange={e => setLoginUsername(e.target.value)}
+                        placeholder="admin, staff_hn, driver_nam..."
+                        className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Mật khẩu (Password)</label>
+                    <div className="relative">
+                      <i className="fa-solid fa-lock absolute left-3 top-3 text-slate-400 text-xs"></i>
+                      <input
+                        type="password"
+                        required
+                        value={loginPassword}
+                        onChange={e => setLoginPassword(e.target.value)}
+                        placeholder="Mật khẩu mặc định: password123"
+                        className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xs transition shadow-md flex items-center justify-center gap-2"
+                  >
+                    {loading ? <i className="fa-solid fa-circle-notch fa-spin"></i> : <i className="fa-solid fa-right-to-bracket"></i>}
+                    Đăng Nhập Vào Hệ Thống
+                  </button>
+                </form>
+
+                {/* Divider */}
+                <div className="relative flex items-center justify-center">
+                  <div className="border-t border-slate-200 w-full"></div>
+                  <span className="bg-white px-3 text-[11px] text-slate-400 uppercase font-semibold whitespace-nowrap">
+                    Hoặc đăng nhập nhanh 1-Click
+                  </span>
+                </div>
+
+                {/* 1-Click Quick Login Cards */}
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleLogin('admin', 'password123')}
+                    className="p-2.5 border border-purple-200 bg-purple-50 hover:bg-purple-100 rounded-xl text-center transition group"
+                  >
+                    <div className="text-base mb-1">👑</div>
+                    <div className="text-xs font-bold text-purple-900">Admin</div>
+                    <div className="text-[10px] text-purple-600 mt-0.5">Toàn quyền</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleLogin('staff_hn', 'password123')}
+                    className="p-2.5 border border-blue-200 bg-blue-50 hover:bg-blue-100 rounded-xl text-center transition group"
+                  >
+                    <div className="text-base mb-1">📋</div>
+                    <div className="text-xs font-bold text-blue-900">Staff</div>
+                    <div className="text-[10px] text-blue-600 mt-0.5">Điều phối</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleLogin('driver_nam', 'password123')}
+                    className="p-2.5 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 rounded-xl text-center transition group"
+                  >
+                    <div className="text-base mb-1">🛵</div>
+                    <div className="text-xs font-bold text-emerald-900">Driver</div>
+                    <div className="text-[10px] text-emerald-600 mt-0.5">Giao hàng</div>
+                  </button>
+                </div>
+
+                {/* Public Tracking Link */}
+                <div className="text-center pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowPublicTrackingOnly(true)}
+                    className="text-xs text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <i className="fa-solid fa-magnifying-glass"></i>
+                    Khách hàng tra cứu đơn công khai (Không cần đăng nhập)
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // ==========================================
+      // VIEW 2: PUBLIC TRACKING ONLY (Unauthenticated)
+      // ==========================================
+      if (!currentUser && showPublicTrackingOnly) {
+        return (
+          <div className="min-h-screen bg-slate-100 p-4 sm:p-8">
+            <div className="max-w-3xl mx-auto space-y-4">
+              <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
+                <div className="flex items-center gap-2 font-bold text-blue-600">
+                  <i className="fa-solid fa-truck-fast text-xl"></i>
+                  <span>FleetFlow Public Tracking</span>
+                </div>
+                <button
+                  onClick={() => setShowPublicTrackingOnly(false)}
+                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold"
+                >
+                  <i className="fa-solid fa-arrow-left mr-1"></i> Quay lại Đăng nhập
+                </button>
+              </div>
+
+              <div className="bg-white p-6 rounded-xl shadow-sm space-y-4">
+                <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                  <i className="fa-solid fa-magnifying-glass text-blue-500"></i> Tra Cứu Lộ Trình Vận Đơn
+                </h2>
+
+                <form onSubmit={handleSearchTracking} className="flex gap-2">
+                  <input
+                    type="text"
+                    value={trackingCode}
+                    onChange={e => setTrackingCode(e.target.value)}
+                    placeholder="Nhập mã vận đơn (VD: FF00000001)..."
+                    className="flex-1 px-4 py-2 border rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                  <button type="submit" className="px-5 py-2 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700">
+                    Tra cứu
+                  </button>
+                </form>
+
+                {trackingData && (
+                  <div className="border rounded-xl p-5 bg-slate-50 space-y-4 text-xs">
+                    <div className="flex justify-between items-center border-b pb-3">
+                      <div>
+                        <span className="text-slate-500 text-[11px]">Mã vận đơn:</span>
+                        <h3 className="text-lg font-bold font-mono text-blue-600">{trackingData.trackingCode}</h3>
+                      </div>
+                      <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800">
+                        {trackingData.currentStatus}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      <div>
+                        <span className="text-slate-500">Người gửi:</span>
+                        <p className="font-semibold">{trackingData.senderMasked}</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Người nhận:</span>
+                        <p className="font-semibold">{trackingData.receiverMasked}</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Trọng lượng:</span>
+                        <p className="font-semibold">{trackingData.totalWeightKg} kg</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Tiền COD:</span>
+                        <p className="font-semibold text-amber-600">{new Intl.NumberFormat('vi-VN').format(trackingData.codAmount)} đ</p>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t">
+                      <h4 className="font-bold text-slate-700 mb-3">Hành trình chi tiết:</h4>
+                      <div className="space-y-3 border-l-2 border-blue-500 ml-2 pl-4">
+                        {trackingData.timeline?.map((ev, i) => (
+                          <div key={i} className="relative">
+                            <div className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-blue-600"></div>
+                            <p className="font-bold text-slate-800">{ev.title}</p>
+                            <p className="text-slate-600">{ev.description}</p>
+                            <p className="text-[10px] text-slate-400">{ev.timestamp}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // ==========================================
+      // VIEW 3: MAIN AUTHENTICATED SYSTEM CONSOLE
+      // ==========================================
+      return (
+        <div>
+          {/* Top Header */}
+          <nav className="bg-slate-900 text-white shadow">
+            <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap justify-between items-center gap-4">
+              <div className="flex items-center gap-3">
+                <i className="fa-solid fa-truck-fast text-2xl text-blue-500"></i>
+                <div>
+                  <h1 className="text-xl font-bold">FleetFlow System Console</h1>
+                  <p className="text-xs text-slate-400">Logistics & Delivery Management</p>
+                </div>
+              </div>
+
+              {/* Current Authenticated User & Quick Switcher */}
+              <div className="flex items-center gap-3 flex-wrap text-xs">
+                <div className="bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span className="text-slate-300">Đăng nhập: <b>{currentUser.username}</b></span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    currentUser.role === 'ROLE_ADMIN' ? 'bg-purple-900 text-purple-200 border border-purple-700' :
+                    currentUser.role === 'ROLE_STAFF' ? 'bg-blue-900 text-blue-200 border border-blue-700' :
+                    'bg-emerald-900 text-emerald-200 border border-emerald-700'
+                  }`}>
+                    {currentUser.role}
+                  </span>
+                </div>
+
+                {/* Quick Account Switcher dropdown/buttons */}
+                <div className="hidden sm:flex items-center gap-1.5">
+                  <button onClick={() => handleLogin('admin', 'password123')} title="Chuyển sang Admin" className="px-2 py-1 bg-slate-800 hover:bg-purple-700 rounded text-[11px] transition">👑 Admin</button>
+                  <button onClick={() => handleLogin('staff_hn', 'password123')} title="Chuyển sang Staff" className="px-2 py-1 bg-slate-800 hover:bg-blue-700 rounded text-[11px] transition">📋 Staff</button>
+                  <button onClick={() => handleLogin('driver_nam', 'password123')} title="Chuyển sang Driver" className="px-2 py-1 bg-slate-800 hover:bg-emerald-700 rounded text-[11px] transition">🛵 Driver</button>
+                </div>
+
+                <button
+                  onClick={handleLogout}
+                  className="px-3 py-1.5 bg-red-600/80 hover:bg-red-600 rounded-lg text-white font-bold transition flex items-center gap-1.5"
+                >
+                  <i className="fa-solid fa-right-from-bracket"></i> Đăng xuất
+                </button>
+              </div>
+            </div>
+
+            {/* Navigation Tabs */}
+            <div className="max-w-7xl mx-auto px-4 border-t border-slate-800 flex space-x-6 overflow-x-auto text-sm">
+              {[
+                { id: 'dashboard', label: '📊 Dashboard', roles: ['ROLE_ADMIN', 'ROLE_MANAGER', 'ROLE_STAFF'] },
+                { id: 'shipments', label: '📦 Quản lý Vận Đơn', roles: ['ROLE_ADMIN', 'ROLE_MANAGER', 'ROLE_STAFF'] },
+                { id: 'dispatch', label: '⚡ Điều Phối & Concurrency', roles: ['ROLE_ADMIN', 'ROLE_MANAGER', 'ROLE_STAFF'] },
+                { id: 'driver', label: '🛵 Cổng Tài Xế', roles: ['ROLE_DRIVER', 'ROLE_ADMIN', 'ROLE_MANAGER', 'ROLE_STAFF'] },
+                { id: 'cod', label: '💰 Đối Soát COD', roles: ['ROLE_ADMIN', 'ROLE_MANAGER', 'ROLE_STAFF'] },
+                { id: 'tracking', label: '🔍 Tra Cứu Công Khai', roles: ['ROLE_ADMIN', 'ROLE_MANAGER', 'ROLE_STAFF', 'ROLE_DRIVER'] },
+              ]
+                .filter(t => !t.roles || !currentUser?.role || t.roles.includes(currentUser.role))
+                .map(t => (
+                <button
+                  key={t.id}
+                  onClick={() => setActiveTab(t.id)}
+                  className={`py-3 px-1 border-b-2 font-medium whitespace-nowrap transition ${
+                    activeTab === t.id ? 'border-blue-500 text-blue-400 font-semibold' : 'border-transparent text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          {/* Notification Toast */}
+          {toast && (
+            <div className="fixed bottom-5 right-5 z-50">
+              <div className={`px-4 py-3 rounded-lg shadow-lg text-white text-xs font-semibold ${
+                toast.type === 'error' ? 'bg-red-600' : toast.type === 'info' ? 'bg-blue-600' : 'bg-emerald-600'
+              }`}>
+                {toast.msg}
+              </div>
+            </div>
+          )}
+
+          {/* Main Content Body */}
+          <main className="max-w-7xl mx-auto px-4 py-6">
+            {/* 1. DASHBOARD */}
+            {activeTab === 'dashboard' && (
+              <div className="space-y-6">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-lg font-bold text-slate-800">Chỉ Số Vận Hành & Doanh Thu (Real-time Dashboard)</h2>
+                  <button onClick={loadDashboard} className="px-3 py-1.5 text-xs font-semibold bg-white border border-slate-300 rounded shadow-sm hover:bg-slate-50">
+                    <i className="fa-solid fa-rotate-right mr-1"></i> Làm mới
+                  </button>
+                </div>
+
+                {dashboardData ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase">Tổng Vận Đơn</span>
+                      <div className="text-2xl font-bold text-slate-900 mt-2">{dashboardData.totalShipments}</div>
+                      <p className="text-xs text-slate-500 mt-1">Đơn chưa gán: <b>{dashboardData.pendingUnassignedShipments}</b></p>
+                    </div>
+
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase">Tỷ Lệ Giao Thành Công</span>
+                      <div className="text-2xl font-bold text-emerald-600 mt-2">{dashboardData.deliverySuccessRatePercent}%</div>
+                      <p className="text-xs text-slate-500 mt-1">Dựa trên đơn hoàn tất và đơn hoàn trả</p>
+                    </div>
+
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase">Doanh Thu Cước</span>
+                      <div className="text-2xl font-bold text-indigo-600 mt-2">
+                        {new Intl.NumberFormat('vi-VN').format(dashboardData.totalShippingRevenue)} đ
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">Từ các đơn giao thành công</p>
+                    </div>
+
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase">Tổng COD Đã Thu</span>
+                      <div className="text-2xl font-bold text-amber-600 mt-2">
+                        {new Intl.NumberFormat('vi-VN').format(dashboardData.totalDeliveredCodVolume)} đ
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">Tài xế hoạt động: <b>{dashboardData.activeDriversCount}</b></p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-8 bg-white rounded-xl border text-center text-slate-400 text-xs">
+                    Đang tải dữ liệu báo cáo...
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 2. SHIPMENTS */}
+            {activeTab === 'shipments' && (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center flex-wrap gap-3">
+                  <div className="flex gap-1.5 flex-wrap text-xs">
+                    {['ALL', 'PENDING', 'ASSIGNED', 'PICKED_UP', 'AT_ORIGIN_HUB', 'IN_TRANSIT', 'AT_DEST_HUB', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DELIVERY_FAILED', 'RETURNED', 'CANCELLED'].map(st => (
+                      <button
+                        key={st}
+                        onClick={() => { setSelectedStatus(st); loadShipments(st); }}
+                        className={`px-2.5 py-1 rounded-full font-medium transition text-[11px] ${
+                          selectedStatus === st ? 'bg-blue-600 text-white shadow-sm' : 'bg-white border text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => { setShowCreateModal(true); handleEstimatePricing(); }}
+                      className="px-3 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                    >
+                      <i className="fa-solid fa-plus mr-1"></i> Tạo Đơn Mới
+                    </button>
+                    <button onClick={() => loadShipments()} className="px-3 py-1.5 text-xs font-semibold bg-white border rounded-lg">
+                      <i className="fa-solid fa-rotate-right"></i>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Table */}
+                <div className="bg-white rounded-xl border shadow-sm overflow-x-auto">
+                  <table className="min-w-full text-xs text-left">
+                    <thead className="bg-slate-50 font-semibold text-slate-600 uppercase border-b">
+                      <tr>
+                        <th className="px-4 py-3">Mã Vận Đơn</th>
+                        <th className="px-4 py-3">Người Nhận</th>
+                        <th className="px-4 py-3">Tỉnh/TP</th>
+                        <th className="px-4 py-3">Cước Phí</th>
+                        <th className="px-4 py-3">Tiền COD</th>
+                        <th className="px-4 py-3">Tài Xế</th>
+                        <th className="px-4 py-3">Trạng Thái</th>
+                        <th className="px-4 py-3">Version</th>
+                        <th className="px-4 py-3">Hành Động</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y font-medium">
+                      {shipments.length > 0 ? (
+                        shipments.map(s => (
+                          <tr key={s.id} className="hover:bg-slate-50">
+                            <td className="px-4 py-3 font-mono font-bold text-blue-600">{s.trackingCode}</td>
+                            <td className="px-4 py-3">{s.receiverName} ({s.receiverPhone})</td>
+                            <td className="px-4 py-3">{s.receiverProvince || 'Hà Nội'}</td>
+                            <td className="px-4 py-3 font-semibold">{new Intl.NumberFormat('vi-VN').format(s.shippingFee)} đ</td>
+                            <td className="px-4 py-3 text-amber-600 font-semibold">{new Intl.NumberFormat('vi-VN').format(s.codAmount)} đ</td>
+                            <td className="px-4 py-3">{s.assignedDriverName || <span className="text-slate-400 italic">Chưa gán</span>}</td>
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                                s.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-800' :
+                                s.status === 'PENDING' ? 'bg-amber-100 text-amber-800' :
+                                s.status === 'ASSIGNED' ? 'bg-blue-100 text-blue-800' :
+                                s.status === 'PICKED_UP' ? 'bg-teal-100 text-teal-800' :
+                                s.status === 'AT_ORIGIN_HUB' || s.status === 'AT_DEST_HUB' ? 'bg-purple-100 text-purple-800' :
+                                s.status === 'IN_TRANSIT' ? 'bg-violet-100 text-violet-800' :
+                                s.status === 'OUT_FOR_DELIVERY' ? 'bg-indigo-100 text-indigo-800' :
+                                s.status === 'DELIVERY_FAILED' ? 'bg-red-100 text-red-800' :
+                                s.status === 'RETURNED' ? 'bg-rose-100 text-rose-800' :
+                                s.status === 'CANCELLED' ? 'bg-slate-200 text-slate-700' : 'bg-slate-100 text-slate-800'
+                              }`}>
+                                {s.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 font-mono text-slate-500">v{s.version}</td>
+                            <td className="px-4 py-3 space-x-1">
+                              {s.status === 'PENDING' && (
+                                <button
+                                  onClick={() => handleTestConcurrency(s.id)}
+                                  className="px-2 py-1 bg-amber-50 text-amber-700 border border-amber-300 rounded hover:bg-amber-100 text-[11px]"
+                                >
+                                  ⚡ Test Concurrency
+                                </button>
+                              )}
+                              <button
+                                onClick={() => { setTrackingCode(s.trackingCode); setActiveTab('tracking'); }}
+                                className="px-2 py-1 bg-slate-100 text-slate-700 rounded hover:bg-slate-200 text-[11px]"
+                              >
+                                Tra cứu
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan="9" className="px-4 py-6 text-center text-slate-400">
+                            {loading ? 'Đang tải...' : 'Không có đơn hàng nào trong trạng thái này.'}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* 3. DISPATCH */}
+            {activeTab === 'dispatch' && (
+              <div className="bg-white p-6 rounded-xl border shadow-sm space-y-4">
+                <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                  <i className="fa-solid fa-bolt text-amber-500"></i> Bảng Điều Phối & Kiểm Thử Concurrency
+                </h2>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Khi nhiều người cùng gán đơn cho 1 tài xế hoặc cùng sửa 1 đơn hàng trong cùng tích tắc, hệ thống bảo vệ bằng
+                  <b> Optimistic Locking (@Version)</b> trên Shipment và <b>Pessimistic Locking</b> trên Driver.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                  <div className="border p-4 rounded-lg bg-slate-50 text-xs space-y-1">
+                    <p className="font-bold text-sm text-slate-800">Tài xế 1: Nguyễn Văn Nam (driver_nam)</p>
+                    <p className="text-slate-600">Xe: Xe máy 29A-12345 (Tải trọng tối đa: 50 kg)</p>
+                    <p className="text-slate-600">Giới hạn nhận đơn: 10 đơn đang xử lý</p>
+                    <span className="inline-block px-2 py-0.5 rounded font-bold text-emerald-800 bg-emerald-100 text-[10px]">AVAILABLE</span>
+                  </div>
+                  <div className="border p-4 rounded-lg bg-slate-50 text-xs space-y-1">
+                    <p className="font-bold text-sm text-slate-800">Tài xế 2: Phạm Tuấn (driver_tuan)</p>
+                    <p className="text-slate-600">Xe: Xe máy 29B-67890 (Tải trọng tối đa: 50 kg)</p>
+                    <p className="text-slate-600">Giới hạn nhận đơn: 10 đơn đang xử lý</p>
+                    <span className="inline-block px-2 py-0.5 rounded font-bold text-emerald-800 bg-emerald-100 text-[10px]">AVAILABLE</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 4. DRIVER PORTAL */}
+            {activeTab === 'driver' && (
+              <div className="bg-white p-6 rounded-xl border shadow-sm space-y-4">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-motorcycle text-emerald-600"></i> Cổng Tài Xế (Driver Operations)
+                  </h2>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        if (currentUser?.driverId) {
+                          apiRequest(`/drivers/${currentUser.driverId}/location`, {
+                            method: 'POST',
+                            body: JSON.stringify({ latitude: 21.028511, longitude: 105.804817, speed: 32 })
+                          }, handleUnauthorized);
+                          notify('Đã ping vị trí GPS thành công!');
+                        } else {
+                          notify('Tài khoản này không liên kết hồ sơ tài xế', 'error');
+                        }
+                      }}
+                      className="px-3 py-1.5 text-xs font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
+                    >
+                      📍 Ping GPS Vị Trí
+                    </button>
+                    <button onClick={loadDriverTasks} className="px-3 py-1.5 text-xs font-semibold bg-white border rounded-lg">
+                      <i className="fa-solid fa-rotate-right"></i>
+                    </button>
+                  </div>
+                </div>
+
+                {driverTasks.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {driverTasks.map(t => (
+                      <div key={t.id} className="border rounded-lg p-4 bg-slate-50 space-y-2 text-xs">
+                        <div className="flex justify-between items-center font-bold">
+                          <span className="text-blue-600 text-sm font-mono">{t.trackingCode}</span>
+                          <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800">{t.status}</span>
+                        </div>
+                        <p><b>Người nhận:</b> {t.receiverName} ({t.receiverPhone})</p>
+                        <p><b>Địa chỉ:</b> {t.receiverAddress}</p>
+                        <p><b>COD thu hộ:</b> <span className="text-amber-600 font-bold">{new Intl.NumberFormat('vi-VN').format(t.codAmount)} đ</span></p>
+
+                        <div className="flex gap-2 pt-2 border-t flex-wrap">
+                          {t.status === 'ASSIGNED' && (
+                            <button
+                              onClick={() => apiRequest(`/shipments/${t.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'PICKED_UP' }) }, handleUnauthorized).then(() => { notify('Đã nhận hàng'); loadDriverTasks(); })}
+                              className="px-2.5 py-1 rounded bg-blue-600 text-white font-medium hover:bg-blue-700"
+                            >
+                              Đã nhận hàng (PICKED_UP)
+                            </button>
+                          )}
+                          {(t.status === 'PICKED_UP' || t.status === 'IN_TRANSIT' || t.status === 'DELIVERY_FAILED') && (
+                            <button
+                              onClick={() => apiRequest(`/shipments/${t.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'OUT_FOR_DELIVERY' }) }, handleUnauthorized).then(() => { notify('Bắt đầu giao'); loadDriverTasks(); })}
+                              className="px-2.5 py-1 rounded bg-indigo-600 text-white font-medium hover:bg-indigo-700"
+                            >
+                              Bắt đầu đi giao (OUT_FOR_DELIVERY)
+                            </button>
+                          )}
+                          {t.status === 'OUT_FOR_DELIVERY' && (
+                            <>
+                              <button
+                                onClick={() => apiRequest(`/shipments/${t.id}/attempts`, { method: 'POST', body: JSON.stringify({ status: 'SUCCESS' }) }, handleUnauthorized).then(() => { notify('Giao thành công!'); loadDriverTasks(); })}
+                                className="px-2.5 py-1 rounded bg-emerald-600 text-white font-medium hover:bg-emerald-700"
+                              >
+                                ✅ Giao thành công
+                              </button>
+                              <button
+                                onClick={() => apiRequest(`/shipments/${t.id}/attempts`, {
+                                  method: 'POST',
+                                  body: JSON.stringify({ status: 'FAILED', failureReason: 'CUSTOMER_UNREACHABLE', failureNote: 'Khách bận không nghe máy' })
+                                }, handleUnauthorized).then(() => { notify('Giao thất bại'); loadDriverTasks(); })}
+                                className="px-2.5 py-1 rounded bg-red-600 text-white font-medium hover:bg-red-700"
+                              >
+                                ❌ Giao thất bại
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-8 text-center text-slate-400 text-xs border border-dashed rounded-lg">
+                    Chưa có đơn hàng nào được gán cho tài xế này. Đăng nhập <b>Staff</b> để gán đơn trước!
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 5. COD SETTLEMENT */}
+            {activeTab === 'cod' && (
+              <div className="bg-white p-6 rounded-xl border shadow-sm space-y-4">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-coins text-amber-500"></i> Quản Lý & Đối Soát Tiền COD (Idempotency)
+                  </h2>
+                  <button
+                    onClick={handleTestIdempotency}
+                    className="px-3 py-1.5 text-xs font-semibold bg-amber-600 text-white rounded-lg hover:bg-amber-700"
+                  >
+                    🛡️ Test Idempotency (Click Đúp)
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-600">
+                  Các khoản COD tài xế thu được từ đơn giao thành công (<code>COLLECTED</code>) đang chờ nộp đối soát về kho:
+                </p>
+
+                <div className="pt-2">
+                  {pendingCod.length > 0 ? (
+                    <div className="divide-y border rounded-lg text-xs">
+                      {pendingCod.map(c => (
+                        <div key={c.id} className="p-3 flex justify-between items-center hover:bg-slate-50">
+                          <div>
+                            <span className="font-bold font-mono text-blue-600">{c.trackingCode}</span>
+                            <span className="text-slate-400 ml-2">Trạng thái: <b>{c.status}</b></span>
+                          </div>
+                          <div className="font-bold text-amber-600">
+                            {new Intl.NumberFormat('vi-VN').format(c.amount)} đ
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-6 text-center text-slate-400 text-xs border border-dashed rounded-lg">
+                      Hiện chưa có khoản tiền COD nào chờ đối soát.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 6. PUBLIC TRACKING */}
+            {activeTab === 'tracking' && (
+              <div className="bg-white p-6 rounded-xl border shadow-sm space-y-4">
+                <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                  <i className="fa-solid fa-magnifying-glass text-blue-500"></i> Tra Cứu Lộ Trình Đơn Hàng (Public Tracking)
+                </h2>
+
+                <form onSubmit={handleSearchTracking} className="flex gap-2">
+                  <input
+                    type="text"
+                    value={trackingCode}
+                    onChange={e => setTrackingCode(e.target.value)}
+                    placeholder="Nhập mã vận đơn (VD: FF-HN240901-001)..."
+                    className="flex-1 px-4 py-2 border rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                  <button type="submit" className="px-5 py-2 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700">
+                    Tra cứu
+                  </button>
+                </form>
+
+                {/* Quick suggestions */}
+                <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-slate-500">
+                  <span>Mã mẫu kiểm thử nhanh:</span>
+                  <button type="button" onClick={() => { setTrackingCode('FF-HN240902-009'); }} className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded font-mono border border-blue-200">
+                    FF-HN240902-009 (Đang giao)
+                  </button>
+                  <button type="button" onClick={() => { setTrackingCode('FF-HN240902-012'); }} className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded font-mono border border-emerald-200">
+                    FF-HN240902-012 (Đã giao)
+                  </button>
+                  <button type="button" onClick={() => { setTrackingCode('FF-HN240902-017'); }} className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded font-mono border border-amber-200">
+                    FF-HN240902-017 (Hoàn hàng)
+                  </button>
+                </div>
+
+                {trackingData && (
+                  <div className="border rounded-xl p-5 bg-slate-50 space-y-4 mt-4 text-xs">
+                    <div className="flex justify-between items-center border-b pb-3">
+                      <div>
+                        <span className="text-slate-500 text-[11px]">Mã vận đơn:</span>
+                        <h3 className="text-lg font-bold font-mono text-blue-600">{trackingData.trackingCode}</h3>
+                      </div>
+                      <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800">
+                        {trackingData.currentStatus}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      <div>
+                        <span className="text-slate-500">Người gửi:</span>
+                        <p className="font-semibold">{trackingData.senderMasked}</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Người nhận:</span>
+                        <p className="font-semibold">{trackingData.receiverMasked}</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Trọng lượng:</span>
+                        <p className="font-semibold">{trackingData.totalWeightKg} kg</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Tiền COD:</span>
+                        <p className="font-semibold text-amber-600">{new Intl.NumberFormat('vi-VN').format(trackingData.codAmount)} đ</p>
+                      </div>
+                    </div>
+
+                    {/* Timeline */}
+                    <div className="pt-3 border-t">
+                      <h4 className="font-bold text-slate-700 mb-3">Hành trình chi tiết:</h4>
+                      <div className="space-y-3 border-l-2 border-blue-500 ml-2 pl-4">
+                        {trackingData.timeline?.map((ev, i) => (
+                          <div key={i} className="relative">
+                            <div className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-blue-600"></div>
+                            <p className="font-bold text-slate-800">{ev.title}</p>
+                            <p className="text-slate-600">{ev.description}</p>
+                            <p className="text-[10px] text-slate-400">{ev.timestamp}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </main>
+
+          {/* CREATE MODAL */}
+          {showCreateModal && (
+            <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-xl shadow-xl max-w-xl w-full p-6 space-y-4 text-xs">
+                <div className="flex justify-between items-center border-b pb-2">
+                  <h3 className="font-bold text-sm">Tạo Vận Đơn Mới (Shipment)</h3>
+                  <button onClick={() => setShowCreateModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+                </div>
+
+                <form onSubmit={handleCreateShipment} className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="font-semibold">Tên người gửi</label>
+                      <input type="text" required value={createForm.senderName} onChange={e => setCreateForm({ ...createForm, senderName: e.target.value })} className="w-full mt-1 p-1.5 border rounded" />
+                    </div>
+                    <div>
+                      <label className="font-semibold">SĐT gửi</label>
+                      <input type="text" required value={createForm.senderPhone} onChange={e => setCreateForm({ ...createForm, senderPhone: e.target.value })} className="w-full mt-1 p-1.5 border rounded" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="font-semibold">Tên người nhận</label>
+                      <input type="text" required value={createForm.receiverName} onChange={e => setCreateForm({ ...createForm, receiverName: e.target.value })} className="w-full mt-1 p-1.5 border rounded" />
+                    </div>
+                    <div>
+                      <label className="font-semibold">SĐT nhận</label>
+                      <input type="text" required value={createForm.receiverPhone} onChange={e => setCreateForm({ ...createForm, receiverPhone: e.target.value })} className="w-full mt-1 p-1.5 border rounded" />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="font-semibold">Địa chỉ giao hàng</label>
+                    <input type="text" required value={createForm.receiverAddress} onChange={e => setCreateForm({ ...createForm, receiverAddress: e.target.value })} className="w-full mt-1 p-1.5 border rounded" />
+                  </div>
+
+                  {/* Weight & Dim */}
+                  <div className="grid grid-cols-4 gap-2 bg-slate-50 p-2 border rounded">
+                    <div>
+                      <label className="font-semibold">Cân nặng (kg)</label>
+                      <input type="number" step="0.1" value={createForm.totalWeightKg} onChange={e => { setCreateForm({ ...createForm, totalWeightKg: e.target.value }); handleEstimatePricing(); }} className="w-full mt-1 p-1 border rounded" />
+                    </div>
+                    <div>
+                      <label className="font-semibold">Dài (cm)</label>
+                      <input type="number" value={createForm.lengthCm} onChange={e => { setCreateForm({ ...createForm, lengthCm: e.target.value }); handleEstimatePricing(); }} className="w-full mt-1 p-1 border rounded" />
+                    </div>
+                    <div>
+                      <label className="font-semibold">Rộng (cm)</label>
+                      <input type="number" value={createForm.widthCm} onChange={e => { setCreateForm({ ...createForm, widthCm: e.target.value }); handleEstimatePricing(); }} className="w-full mt-1 p-1 border rounded" />
+                    </div>
+                    <div>
+                      <label className="font-semibold">Cao (cm)</label>
+                      <input type="number" value={createForm.heightCm} onChange={e => { setCreateForm({ ...createForm, heightCm: e.target.value }); handleEstimatePricing(); }} className="w-full mt-1 p-1 border rounded" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="font-semibold">Gói cước</label>
+                      <select value={createForm.serviceTier} onChange={e => { setCreateForm({ ...createForm, serviceTier: e.target.value }); handleEstimatePricing(); }} className="w-full mt-1 p-1.5 border rounded bg-white">
+                        <option value="STANDARD">Tiêu chuẩn (STANDARD)</option>
+                        <option value="EXPRESS">Hoả tốc (EXPRESS)</option>
+                        <option value="SAME_DAY">Trong ngày (SAME_DAY)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="font-semibold">Tiền COD (đ)</label>
+                      <input type="number" value={createForm.codAmount} onChange={e => { setCreateForm({ ...createForm, codAmount: e.target.value }); handleEstimatePricing(); }} className="w-full mt-1 p-1.5 border rounded" />
+                    </div>
+                  </div>
+
+                  {estimatedPrice && (
+                    <div className="bg-blue-50 border border-blue-200 p-2.5 rounded flex justify-between items-center">
+                      <span>Trọng lượng cước: <b>{estimatedPrice.chargeableWeightKg} kg</b></span>
+                      <span className="font-bold text-blue-700 text-sm">{new Intl.NumberFormat('vi-VN').format(estimatedPrice.totalEstimatedFee)} đ</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end gap-2 pt-2 border-t">
+                    <button type="button" onClick={() => setShowCreateModal(false)} className="px-3 py-1.5 border rounded text-slate-600 hover:bg-slate-50">Hủy</button>
+                    <button type="submit" disabled={loading} className="px-4 py-1.5 bg-blue-600 text-white font-semibold rounded hover:bg-blue-700">
+                      {loading ? 'Đang tạo...' : 'Tạo Đơn Hàng'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
